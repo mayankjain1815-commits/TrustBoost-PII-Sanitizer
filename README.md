@@ -205,4 +205,4 @@ Full OpenAPI spec: [api.trustboost.dev/openapi.json](https://api.trustboost.dev/
 
 ---
 
-*Built for the autonomous agent economy. MIT License.*
+*Built for the autonomous agent economy. [MIT License](LICENSE).*
