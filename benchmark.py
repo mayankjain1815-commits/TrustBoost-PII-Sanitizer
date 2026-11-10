@@ -77,7 +77,11 @@ CORPUS = [
 
 
 def sanitize(text, context="general"):
-    """Call TrustBoost API and return result."""
+    """Call TrustBoost API and return (data, latency_ms).
+
+    data is None when the request failed (non-200 response, timeout, or
+    connection error). latency_ms is 0 for requests that raised.
+    """
     start = time.time()
     try:
         r = requests.post(
@@ -94,6 +98,27 @@ def sanitize(text, context="general"):
         return None, 0
 
 
+def score_case(case, data):
+    """Classify one corpus case against an API response.
+
+    Returns (outcome, risk) where outcome is one of:
+      tp, fp, fn, tn — request succeeded and was scored
+      error           — request failed (data is None) or the response
+                        was malformed (no risk_category field)
+
+    A failed request is an error, never a successful negative control:
+    an unreachable API must not be reported as passing the benchmark.
+    """
+    if data is None:
+        return "error", "REQUEST_FAILED"
+    risk = data.get("risk_category")
+    if not risk:
+        return "error", "MISSING_RISK_CATEGORY"
+    if case["has_pii"]:
+        return ("tp" if risk != "CLEAN" else "fn"), risk
+    return ("fp" if risk != "CLEAN" else "tn"), risk
+
+
 def run_benchmark():
     print("\n🛡️  TrustBoost PII Sanitizer — Performance Benchmark")
     print("=" * 60)
@@ -106,35 +131,28 @@ def run_benchmark():
 
     for case in CORPUS:
         data, latency_ms = sanitize(case["text"], case["ctx"])
-        latencies.append(latency_ms)
-
-        if data is None:
-            detected = False
-        else:
-            risk = data.get("risk_category", "CLEAN")
-            detected = risk != "CLEAN"
-
-        tp = 1 if case["has_pii"] and detected else 0
-        fp = 1 if not case["has_pii"] and detected else 0
-        fn = 1 if case["has_pii"] and not detected else 0
-        tn = 1 if not case["has_pii"] and not detected else 0
+        outcome, risk = score_case(case, data)
+        if outcome != "error":
+            latencies.append(latency_ms)
 
         results.append({
             **case,
-            "detected": detected,
-            "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+            "outcome": outcome,
             "latency_ms": latency_ms,
-            "risk": data.get("risk_category", "ERROR") if data else "ERROR"
+            "risk": risk
         })
 
-        status = "✅" if (tp or tn) else "❌"
+        status = "✅" if outcome in ("tp", "tn") else ("⚠️" if outcome == "error" else "❌")
         print(f"{status} [{case['lang']}] {case['pii_type']} | {case['text'][:50]}...")
 
     # ── Global metrics ────────────────────────────────────────────────────────
-    tp_total = sum(r["tp"] for r in results)
-    fp_total = sum(r["fp"] for r in results)
-    fn_total = sum(r["fn"] for r in results)
-    tn_total = sum(r["tn"] for r in results)
+    # Scored over successful responses only; failed requests are counted as
+    # errors, never as true negatives.
+    tp_total = sum(1 for r in results if r["outcome"] == "tp")
+    fp_total = sum(1 for r in results if r["outcome"] == "fp")
+    fn_total = sum(1 for r in results if r["outcome"] == "fn")
+    tn_total = sum(1 for r in results if r["outcome"] == "tn")
+    err_total = sum(1 for r in results if r["outcome"] == "error")
 
     precision = tp_total / (tp_total + fp_total) if (tp_total + fp_total) > 0 else 0
     recall    = tp_total / (tp_total + fn_total) if (tp_total + fn_total) > 0 else 0
@@ -147,42 +165,49 @@ def run_benchmark():
     print("\n" + "=" * 60)
     print("GLOBAL RESULTS")
     print("=" * 60)
+    if err_total:
+        print(f"  ⚠️  {err_total}/{len(results)} API requests failed — the metrics below")
+        print(f"      cover successful responses only and are NOT a valid benchmark.")
     print(f"  Precision:       {precision:.3f}")
     print(f"  Recall:          {recall:.3f}")
     print(f"  F1 Score:        {f1:.3f}")
     print(f"  False Pos Rate:  {fpr:.3f}")
     print(f"  Avg Latency:     {avg_latency:.0f}ms")
     print(f"  p99 Latency:     {p99_latency:.0f}ms")
-    print(f"  TP: {tp_total} | FP: {fp_total} | FN: {fn_total} | TN: {tn_total}")
+    print(f"  TP: {tp_total} | FP: {fp_total} | FN: {fn_total} | TN: {tn_total} | ERR: {err_total}")
 
     # ── Per-language metrics ──────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("PER LANGUAGE")
     print("=" * 60)
-    print(f"{'Language':<12} {'Precision':<12} {'Recall':<10} {'F1':<8} {'Cases'}")
-    print("-" * 55)
+    print(f"{'Language':<12} {'Precision':<12} {'Recall':<10} {'F1':<8} {'Err':<5} {'Cases'}")
+    print("-" * 60)
 
     langs = sorted(set(r["lang"] for r in results))
     for lang in langs:
         lr = [r for r in results if r["lang"] == lang]
-        ltp = sum(r["tp"] for r in lr)
-        lfp = sum(r["fp"] for r in lr)
-        lfn = sum(r["fn"] for r in lr)
+        ltp = sum(1 for r in lr if r["outcome"] == "tp")
+        lfp = sum(1 for r in lr if r["outcome"] == "fp")
+        lfn = sum(1 for r in lr if r["outcome"] == "fn")
+        lerr = sum(1 for r in lr if r["outcome"] == "error")
         lp = ltp / (ltp + lfp) if (ltp + lfp) > 0 else 1.0
         lre = ltp / (ltp + lfn) if (ltp + lfn) > 0 else 1.0
         lf1 = 2 * lp * lre / (lp + lre) if (lp + lre) > 0 else 0
-        print(f"{lang:<12} {lp:<12.3f} {lre:<10.3f} {lf1:<8.3f} {len(lr)}")
+        print(f"{lang:<12} {lp:<12.3f} {lre:<10.3f} {lf1:<8.3f} {lerr:<5} {len(lr)}")
 
     # ── Ruflo win condition check ─────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("RUFLO WIN CONDITION (@ruvnet requirement)")
     print("=" * 60)
     latam_jp = [r for r in results if r["lang"] in ("ES-LATAM", "PT-BR", "JA")]
-    if latam_jp:
-        ltp = sum(r["tp"] for r in latam_jp)
-        lfp = sum(r["fp"] for r in latam_jp)
-        lfn = sum(r["fn"] for r in latam_jp)
-        ltn = sum(r["tn"] for r in latam_jp)
+    latam_jp_err = sum(1 for r in latam_jp if r["outcome"] == "error")
+    if latam_jp_err:
+        print(f"  ⚠️  Not evaluated: {latam_jp_err} LATAM/JP request(s) failed.")
+    else:
+        ltp = sum(1 for r in latam_jp if r["outcome"] == "tp")
+        lfp = sum(1 for r in latam_jp if r["outcome"] == "fp")
+        lfn = sum(1 for r in latam_jp if r["outcome"] == "fn")
+        ltn = sum(1 for r in latam_jp if r["outcome"] == "tn")
         lp = ltp / (ltp + lfp) if (ltp + lfp) > 0 else 1.0
         lre = ltp / (ltp + lfn) if (ltp + lfn) > 0 else 1.0
         lfpr = lfp / (lfp + ltn) if (lfp + ltn) > 0 else 0
@@ -191,8 +216,14 @@ def run_benchmark():
         print(f"  LATAM/JP Recall:     {lre:.3f} {recall_ok} (target ≥0.95)")
         print(f"  LATAM/JP FPR:        {lfpr:.3f} {fpr_ok} (target ≤0.05)")
 
-    print("\n✅ Benchmark complete.")
-    return {"precision": precision, "recall": recall, "f1": f1, "fpr": fpr}
+    if err_total:
+        print(f"\n❌ Benchmark incomplete: {err_total}/{len(results)} request(s) failed. Re-run when the API is reachable.")
+    else:
+        print("\n✅ Benchmark complete.")
+    return {
+        "precision": precision, "recall": recall, "f1": f1, "fpr": fpr,
+        "errors": err_total, "successful": len(results) - err_total,
+    }
 
 
 if __name__ == "__main__":
