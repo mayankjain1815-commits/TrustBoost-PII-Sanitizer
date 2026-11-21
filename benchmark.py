@@ -189,11 +189,22 @@ def run_benchmark():
         ltp = sum(1 for r in lr if r["outcome"] == "tp")
         lfp = sum(1 for r in lr if r["outcome"] == "fp")
         lfn = sum(1 for r in lr if r["outcome"] == "fn")
+        ltn = sum(1 for r in lr if r["outcome"] == "tn")
         lerr = sum(1 for r in lr if r["outcome"] == "error")
-        lp = ltp / (ltp + lfp) if (ltp + lfp) > 0 else 1.0
-        lre = ltp / (ltp + lfn) if (ltp + lfn) > 0 else 1.0
-        lf1 = 2 * lp * lre / (lp + lre) if (lp + lre) > 0 else 0
-        print(f"{lang:<12} {lp:<12.3f} {lre:<10.3f} {lf1:<8.3f} {lerr:<5} {len(lr)}")
+
+        # A language with no successfully scored cases has no measurable
+        # precision/recall: report N/A rather than a perfect score. Previously
+        # 1.0 defaults made an all-failed language look perfect while the same
+        # run reported the failures globally — a failed request is not a pass.
+        scored = ltp + lfp + lfn + ltn
+        if scored == 0:
+            lp_s = lre_s = lf1_s = "N/A"
+        else:
+            lp = ltp / (ltp + lfp) if (ltp + lfp) > 0 else 0.0
+            lre = ltp / (ltp + lfn) if (ltp + lfn) > 0 else 0.0
+            lf1 = 2 * lp * lre / (lp + lre) if (lp + lre) > 0 else 0.0
+            lp_s, lre_s, lf1_s = f"{lp:.3f}", f"{lre:.3f}", f"{lf1:.3f}"
+        print(f"{lang:<12} {lp_s:<12} {lre_s:<10} {lf1_s:<8} {lerr:<5} {len(lr)}")
 
     # ── Ruflo win condition check ─────────────────────────────────────────────
     print("\n" + "=" * 60)
