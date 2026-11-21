@@ -98,5 +98,52 @@ class FailedRunTests(unittest.TestCase):
         self.assertNotIn("✅ Benchmark complete.", text)
 
 
+class PerLanguageMetricsTests(unittest.TestCase):
+    """A language with no scored responses must not look like a perfect one."""
+
+    def setUp(self):
+        self._original = benchmark.sanitize
+
+    def tearDown(self):
+        benchmark.sanitize = self._original
+
+    def run_with_sanitize(self, fake):
+        benchmark.sanitize = fake
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            summary = benchmark.run_benchmark()
+        return out.getvalue(), summary
+
+    @staticmethod
+    def language_table(text):
+        return text.split("PER LANGUAGE")[1].split("RUFLO WIN CONDITION")[0]
+
+    @staticmethod
+    def language_row(table, lang):
+        return next(line for line in table.splitlines() if line.startswith(lang + " "))
+
+    def test_failed_language_is_not_reported_as_perfect(self):
+        ja_texts = {c["text"] for c in benchmark.CORPUS if c["lang"] == "JA"}
+        text, _ = self.run_with_sanitize(
+            lambda t, c="general": (None, 0) if t in ja_texts else ({"risk_category": "PRIVATE"}, 10)
+        )
+        row = self.language_row(self.language_table(text), "JA")
+        self.assertNotIn("1.000", row, row)
+        self.assertIn("N/A", row, row)
+        self.assertIn("4", row.split()[-2:], row)  # 4 errors out of 4 cases
+
+    def test_all_failed_run_marks_every_language_not_evaluated(self):
+        text, _ = self.run_with_sanitize(lambda t, c="general": (None, 0))
+        table = self.language_table(text)
+        langs = {c["lang"] for c in benchmark.CORPUS}
+        rows = [line for line in table.splitlines()
+                if line.split() and line.split()[0] in langs]
+        self.assertEqual(len(rows), len(langs))
+        for row in rows:
+            with self.subTest(row=row):
+                self.assertIn("N/A", row)
+                self.assertNotIn("1.000", row)
+
+
 if __name__ == "__main__":
     unittest.main()
